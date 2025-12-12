@@ -1,9 +1,15 @@
-
+// src/contexts/DataContext.tsx
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { INITIAL_PRODUCTS, INITIAL_ORDERS, MOCK_CUSTOMERS } from '../data/mock';
+import { 
+  collection, getDocs, addDoc, updateDoc, deleteDoc, doc, 
+  query, where, onSnapshot 
+} from 'firebase/firestore';
+import { db } from '../src/lib/firebase';
+import { useAuth } from './AuthContext';
 
-type Product = {
-  id: number;
+// Types
+export type Product = {
+  id: string; // Changed from number to string for Firestore IDs
   name: string;
   price: number;
   category: string;
@@ -18,7 +24,6 @@ type CartItem = Product & { quantity: number };
 type DataContextType = {
   products: Product[];
   orders: any[];
-  customers: any[];
   cart: CartItem[];
   selectedProduct: Product | null;
   toast: { show: boolean; message: string };
@@ -26,118 +31,157 @@ type DataContextType = {
   // Actions
   setSelectedProduct: (product: Product | null) => void;
   addToCart: (product: Product) => void;
-  removeFromCart: (productId: number) => void;
+  removeFromCart: (productId: string) => void;
   getCartTotal: () => number;
   clearCart: () => void;
-  addProduct: (product: any) => void;
-  updateProduct: (product: any) => void;
-  deleteProduct: (id: number) => void;
-  placeOrder: (details: any) => void;
-  updateOrderStatus: (id: string, status: string) => void;
+  addProduct: (product: any) => Promise<void>;
+  updateProduct: (product: any) => Promise<void>;
+  deleteProduct: (id: string) => Promise<void>;
+  placeOrder: (details: any) => Promise<void>;
+  updateOrderStatus: (id: string, status: string) => Promise<void>;
   showToast: (msg: string) => void;
   hideToast: () => void;
+  customers: any[]; // Kept mock for now
 };
 
 const DataContext = createContext<DataContextType | undefined>(undefined);
 
-export const DataProvider = ({ children }: { children?: ReactNode }) => {
-  const [products, setProducts] = useState(() => {
-    // Basic cache busting strategy: Check if "v1_data" exists. If not, clear old and load new.
-    const isV1 = localStorage.getItem('data_version') === '1.1';
-    if (!isV1) {
-        localStorage.removeItem('products');
-        localStorage.setItem('data_version', '1.1');
-        return INITIAL_PRODUCTS;
-    }
-
-    const saved = localStorage.getItem('products');
-    return saved ? JSON.parse(saved) : INITIAL_PRODUCTS;
-  });
-  const [orders, setOrders] = useState(() => {
-    const saved = localStorage.getItem('orders');
-    return saved ? JSON.parse(saved) : INITIAL_ORDERS;
-  });
-  const [cart, setCart] = useState(() => {
-    const saved = localStorage.getItem('cart');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [customers] = useState(MOCK_CUSTOMERS);
+export const DataProvider = ({ children }: { children: ReactNode }) => {
+  const { user } = useAuth();
+  const [products, setProducts] = useState<Product[]>([]);
+  const [orders, setOrders] = useState<any[]>([]);
+  const [cart, setCart] = useState<CartItem[]>([]); // Local cart for now (simplest for phase 1)
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [toast, setToast] = useState({ show: false, message: '' });
 
-  useEffect(() => { localStorage.setItem('products', JSON.stringify(products)); }, [products]);
-  useEffect(() => { localStorage.setItem('orders', JSON.stringify(orders)); }, [orders]);
-  useEffect(() => { localStorage.setItem('cart', JSON.stringify(cart)); }, [cart]);
+  // Fetch Products Real-time
+  useEffect(() => {
+    const q = collection(db, 'products');
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const prods = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Product));
+      setProducts(prods);
+    });
+    return unsubscribe;
+  }, []);
+
+  // Fetch Orders (If Admin)
+  useEffect(() => {
+    if (user?.role === 'admin') {
+      const unsubscribe = onSnapshot(collection(db, 'orders'), (snapshot) => {
+        const ords = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setOrders(ords);
+      });
+      return unsubscribe;
+    }
+  }, [user]);
 
   const showToast = (message: string) => setToast({ show: true, message });
   const hideToast = () => setToast({ ...toast, show: false });
 
+  // --- Cart Logic (Local State for Speed) ---
   const addToCart = (product: Product) => {
-    const existing = cart.find((item: CartItem) => item.id === product.id);
+    const existing = cart.find((item) => item.id === product.id);
     if (existing) {
-      setCart(cart.map((item: CartItem) => item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item));
+      setCart(cart.map((item) => item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item));
     } else {
       setCart([...cart, { ...product, quantity: 1 }]);
     }
     showToast(`Acquired ${product.name}`);
   };
 
-  const removeFromCart = (productId: number) => {
-    setCart(cart.filter((item: CartItem) => item.id !== productId));
+  const removeFromCart = (productId: string) => {
+    setCart(cart.filter((item) => item.id !== productId));
   };
 
-  const getCartTotal = () => cart.reduce((sum: number, item: CartItem) => sum + (item.price * item.quantity), 0);
+  const getCartTotal = () => cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
   const clearCart = () => setCart([]);
 
-  // Admin Actions
-  const addProduct = (newProduct: any) => {
-    const productWithId = { ...newProduct, id: Date.now(), rating: 0, sales: 0 };
-    setProducts([productWithId, ...products]);
-    showToast("Artifact cataloged");
+  // --- Database Actions ---
+  
+  const addProduct = async (newProduct: any) => {
+    try {
+      await addDoc(collection(db, 'products'), {
+        ...newProduct,
+        rating: 0,
+        sales: 0,
+        createdAt: new Date()
+      });
+      showToast("Artifact cataloged");
+    } catch (e) {
+      console.error(e);
+      showToast("Error adding product");
+    }
   };
 
-  const updateProduct = (updatedProduct: any) => {
-    setProducts(products.map((p: Product) => p.id === updatedProduct.id ? updatedProduct : p));
-    showToast("Artifact updated");
+  const updateProduct = async (updatedProduct: any) => {
+    try {
+      const productRef = doc(db, 'products', updatedProduct.id);
+      await updateDoc(productRef, updatedProduct);
+      showToast("Artifact updated");
+    } catch (e) {
+      console.error(e);
+      showToast("Error updating");
+    }
   };
 
-  const deleteProduct = (id: number) => {
-    setProducts(products.filter((p: Product) => p.id !== id));
-    showToast("Artifact removed");
+  const deleteProduct = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'products', id));
+      showToast("Artifact removed");
+    } catch (e) {
+      console.error(e);
+      showToast("Error removing");
+    }
   };
 
-  const placeOrder = (details: any) => {
-    const newOrder = {
-      id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
-      customer: details.name,
-      date: new Date().toISOString().split('T')[0],
-      items: cart.reduce((acc: number, item: CartItem) => acc + item.quantity, 0),
-      total: getCartTotal(),
-      status: 'Processing'
-    };
-    setOrders([newOrder, ...orders]);
-    
-    // Update inventory
-    const updatedProducts = products.map((p: Product) => {
-      const cartItem = cart.find((c: CartItem) => c.id === p.id);
-      if (cartItem) {
-        return { ...p, sales: (p.sales || 0) + cartItem.quantity, stock: Math.max(0, p.stock - cartItem.quantity) };
-      }
-      return p;
-    });
-    setProducts(updatedProducts);
-    clearCart();
-    showToast("Commission Placed Successfully!");
+  const placeOrder = async (details: any) => {
+    try {
+      const orderData = {
+        customer: details.name,
+        email: details.email,
+        address: details.address,
+        date: new Date().toISOString().split('T')[0],
+        items: cart,
+        total: getCartTotal(),
+        status: 'Processing',
+        userId: user?.uid || 'guest'
+      };
+      
+      await addDoc(collection(db, 'orders'), orderData);
+      
+      // Update Stock (Optional: simplified)
+      // In production, use a Transaction to ensure stock doesn't go below 0
+      cart.forEach(async (item) => {
+        if (item.stock > 0) {
+           const productRef = doc(db, 'products', item.id);
+           await updateDoc(productRef, { 
+             stock: item.stock - item.quantity,
+             sales: (item.sales || 0) + item.quantity
+           });
+        }
+      });
+
+      clearCart();
+      showToast("Commission Placed Successfully!");
+    } catch (e) {
+      console.error(e);
+      showToast("Order Failed");
+    }
   };
 
-  const updateOrderStatus = (orderId: string, newStatus: string) => {
-    setOrders(orders.map((o: any) => o.id === orderId ? { ...o, status: newStatus } : o));
-    showToast(`Order ${orderId} status updated`);
+  const updateOrderStatus = async (orderId: string, newStatus: string) => {
+    try {
+      const orderRef = doc(db, 'orders', orderId);
+      await updateDoc(orderRef, { status: newStatus });
+      showToast(`Order updated`);
+    } catch (e) {
+       showToast("Update failed");
+    }
   };
 
   return (
     <DataContext.Provider value={{
-      products, orders, customers, cart, selectedProduct, toast,
+      products, orders, customers: [], cart, selectedProduct, toast,
       setSelectedProduct, addToCart, removeFromCart, getCartTotal, clearCart,
       addProduct, updateProduct, deleteProduct, placeOrder, updateOrderStatus,
       showToast, hideToast
